@@ -282,5 +282,3 @@ def add_feedback(session,day,previous_session,peak_range,dip_range):
             feedback.append(f"Two demanding tasks back-to-back may have caused cognitive fatigue. Try doing {session['task_name']} after an easy task such as: {easy_tasks}  ")
 
 
-def next_best_task(tasks,current_energy,dip_range,peak_range,current_time):  #what should user do now?
-    scored =[]
