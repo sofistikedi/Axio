@@ -55,7 +55,6 @@ if "user" not in st.session_state or not st.session_state.user:
                     st.success(f"Logged in as {username}")
                     st.rerun()
 else:
-    # User is logged in, show the rest of your app
     st.write(f"Logged in as: {st.session_state.user}")  
 
 
@@ -126,7 +125,7 @@ def performance_score(s):
     if s.get("actual_duration",0) == 0:
         return 0
     return round((
-        (s["optimal_duration"] / s["actual_duration"]) +
+        min(s["actual_duration"] / s["optimal_duration"], 1) +
         (s["current_energy"] / s["required_energy"]) +
         (s["mood"] / 10)
     ) / 3, 2)
@@ -136,8 +135,27 @@ def analyze_hourly_performance(day_logs):
     for d in day_logs:
         for s in d.get("sessions", []):
             hour = int(s["start_time"].split(":")[0])
-            hourly.setdefault(hour, []).append(performance_score(s))
+
+            base_score = (
+                (s["current_energy"] / s["required_energy"]) +
+                (s["mood"] / 10)
+            ) / 2
+
+            hourly.setdefault(hour, []).append(base_score)
+
     return {h: sum(v)/len(v) for h, v in hourly.items()}
+
+def performance_label(score):
+    if score >= 0.85:
+        return "Peak Focus"
+    elif score >= 0.7:
+        return "Highly Productive"
+    elif score >= 0.55:
+        return "Solid"
+    elif score >= 0.4:
+        return "Low Energy"
+    else:
+        return "Not Ideal"
 
 def detect_actual_peak(hourly):
     return max(hourly, key=hourly.get) if hourly else None
@@ -157,19 +175,14 @@ def analyze_energy_mismatch(day_logs):
 
 def analyze_task_sequence(day_logs):
     sequences = []
-    difficulty_map = lambda d: d.get("difficulty","easy") if isinstance(d,dict) else "easy"
     for day in day_logs:
         sessions = day.get("sessions", [])
         for i in range(len(sessions)-1):
             first = sessions[i]
             second = sessions[i+1]
-            first_diff = difficulty_map(first)
-            second_diff = difficulty_map(second)
             change = performance_score(second) - performance_score(first)
             sequences.append({
                 "pair": (first["task_name"], second["task_name"]),
-                "first_diff": first_diff,
-                "second_diff": second_diff,
                 "change": change
             })
     return sequences
@@ -181,90 +194,57 @@ def get_today_sessions():
             return d.get("sessions", [])
     return []
 
-def build_ai_input():
-    day_logs = st.session_state.day_logs
-    if not day_logs:
-        return {}
-
-    last_day = day_logs[-1]
-    sessions = last_day.get("sessions", [])
-    hourly = analyze_hourly_performance(day_logs)
-    scores = [performance_score(s) for d in day_logs for s in d.get("sessions", [])]
-
-    return {
-        "recent_sessions": sessions[-3:],
-        "avg_performance": sum(scores)/len(scores) if scores else None,
-        "peak_hour": detect_actual_peak(hourly)
-    }
-
-def get_ai_feedback():
-    if "ai_feedback" in st.session_state:
-        return st.session_state.ai_feedback
-
-    data = build_ai_input()
-    if not data:
-        return "Start logging sessions to get feedback."
-
-    prompt = f"""
-You are an elite productivity coach.
-
-User data:
-{data}
-
-Give:
-1. One key insight
-2. One mistake
-3. 3 specific actions
-"""
-
-    try:
-        res = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a productivity coach."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7
-        )
-        feedback = res.choices[0].message.content
-        st.session_state.ai_feedback = feedback
-        return feedback
-    except Exception as e:
-        return "AI feedback unavailable right now. Keep logging sessions!"
-
 st.sidebar.title(" Axio")
 menu = st.sidebar.radio("Navigate", ["Dashboard","Log Session","Tasks","Profile","AI Coach"])
 
-events= []
-for d in st.session_state.day_logs:
-    for s in d.get("sessions",[]):
-        events.append({
-            "title": s["task_name"],
-            "start": f"{d['date']}T{s['start_time']}",
-            "end": f"{d['date']}T{s['end_time']}"
-        })
-calendar(events=events)
-
 if menu == "Dashboard":
-    st.title("Axio Overview")  # renamed from Dashboard
+    st.title("Axio Overview")
+
+    events= []
+    for d in st.session_state.day_logs:
+        for s in d.get("sessions",[]):
+            events.append({
+                "title": s["task_name"],
+                "start": f"{d['date']}T{s['start_time']}",
+                "end": f"{d['date']}T{s['end_time']}"
+            })
+    calendar(events=events)
 
     hourly = analyze_hourly_performance(st.session_state.day_logs)
     peak = detect_actual_peak(hourly)
     scores = [performance_score(s) for d in st.session_state.day_logs for s in d.get("sessions",[])]
-    avg = round(sum(scores)/len(scores),2) if scores else 0
 
-    df_hourly = pd.DataFrame({
-        "Hour": [f"{h}:00" for h in hourly.keys()],
-        "Performance": list(hourly.values())
-    }).set_index("Hour")
-
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     col1.metric("Peak Hour", f"{peak}:00" if peak else "N/A")
-    col2.metric("Avg Performance", avg)
-    col3.metric("Sessions", len(scores))
+    col2.metric("Sessions Logged", len(scores))
+
+    st.subheader("Recommended Sleep Window")
+
+    age = st.session_state.profile.get("age", None)
+
+    if age:
+        if age <= 18:
+            sleep_range = "8–10 hours"
+        elif age <= 25:
+            sleep_range = "7–9 hours"
+        elif age <= 64:
+            sleep_range = "7–8 hours"
+        else:
+            sleep_range = "7–9 hours"
+
+        wake = st.session_state.profile.get("wake")
+        sleep = st.session_state.profile.get("sleep")
+
+        if wake and sleep:
+            st.success(f"Ideal: {sleep_range} | Your schedule: {sleep} → {wake}")
+        else:
+            st.info(f"Ideal for your age: {sleep_range}")
+    else:
+        st.info("Add your age in Profile")
 
     st.divider()
     st.subheader("Today's Sessions")
+
     sessions = get_today_sessions()
     if sessions:
         for s in sessions:
@@ -273,39 +253,24 @@ if menu == "Dashboard":
         st.info("No sessions today")
 
     st.divider()
-    st.subheader("Performance by Hour")
+    st.subheader("Your Daily Rhythm")
+
     if hourly:
-        st.bar_chart(df_hourly)
+        sorted_hours = sorted(hourly.items(), key=lambda x: x[1], reverse=True)
+        for h, score in sorted_hours:
+            st.write(f"{h}:00 → {performance_label(score)}")
     else:
         st.info("No data yet")
 
     st.subheader("⚠️ Energy Mismatches ⚠️")
     mismatches= analyze_energy_mismatch(st.session_state.day_logs)
-    if mismatches:
+    if not scores:
+        st.info("No data yet")
+    elif mismatches:
         for m in mismatches[-5:]:
-            st.warning(
-                f" You tried {m['task']} with a calculated gap of (Energy gap: {m['gap']}) energy on  {m['date']} Try recharging or rearranging your tasks"
-            )
+            st.warning(f"{m['task']} | gap: {m['gap']} | {m['date']}")
     else:
-        st.success("Amazing! Your energy allignment is on point. Are you are wizard or what? 😉") 
-
-    st.subheader("Task Flow Insights")
-    sequences= analyze_task_sequence(st.session_state.day_logs)
-    bad_patterns= [
-        s for s in sequences
-        if s["first_diff"] in ["hard", "very_hard"]
-        and s["second_diff"] in ["hard","very_hard"]
-        and s["change"] <0
-    ]
-    if bad_patterns:
-        for s in bad_patterns[-5:]:
-            st.warning(
-                f"{s['pair'][0]} --> {s['pair'][1]} decreased performance ({s['change']}). Try switching the order of tasks : small changes can make huge impact!"
-            )
-    else: 
-        st.success(
-            "Great job! You managed to consecutively handle difficult tasks, pat your self in the back!"
-        )
+        st.success("Great energy alignment")
 
 elif menu == "Log Session":
     st.title(" Log Session")
@@ -316,16 +281,13 @@ elif menu == "Log Session":
         task = next(t for t in st.session_state.tasks if t["name"]==task_name)
         start = st.time_input("Start Time")
         end = st.time_input("End Time")
-        energy = st.slider("Energy",1,10)
-        mood = st.slider("Mood",1,10)
+        energy = st.slider("Energy BEFORE task",1,10)
+        mood = st.slider("Mood BEFORE task",1,10)
 
         if st.button("Log Session"):
             duration = compute_duration(start,end)
             today = str(date.today())
-            day = next(
-                (d for d in st.session_state.day_logs if d.get("date") == today),
-                None
-            )
+            day = next((d for d in st.session_state.day_logs if d.get("date") == today),None)
             if not day:
                 day={"date":today,"sessions":[]}
                 st.session_state.day_logs.append(day)
@@ -338,54 +300,68 @@ elif menu == "Log Session":
                 "optimal_duration": task["optimal_duration"],
                 "required_energy": task["required_energy"],
                 "current_energy": energy,
-                "mood": mood,
-                "difficulty": task.get("difficulty","easy")
+                "mood": mood
             })
             save_user_data()
             st.success("Session logged!")
 
 elif menu == "Tasks":
-    st.title("📋 Tasks")
+    st.title("Tasks")
+
     with st.form("task_form"):
         name = st.text_input("Task Name")
-        optimal = st.number_input("Optimal Duration",1)
+        optimal = st.number_input("Optimal Duration (min)",1)
         energy = st.slider("Energy Required",1,10)
+
         if st.form_submit_button("Add Task"):
             st.session_state.tasks.append({
                 "id": len(st.session_state.tasks)+1,
                 "name": name,
                 "optimal_duration": optimal,
-                "required_energy": energy,
-                "difficulty":"easy"
+                "required_energy": energy
             })
             save_user_data()
             st.success("Task added!")
-    st.divider()
+
     st.subheader("Your Tasks")
+
     for i, t in enumerate(st.session_state.tasks):
-        col1, col2 = st.columns([4,1])
+        col1, col2, col3 = st.columns([3,1,1])
         col1.write(f"• {t['name']}")
-        if col2.button("Delete", key=f"del_{i}"):
+
+        if col2.button("Edit", key=f"edit_{i}"):
+            st.session_state.edit_index = i
+
+        if col3.button("Delete", key=f"del_{i}"):
             st.session_state.tasks.pop(i)
             save_user_data()
             st.experimental_rerun()
 
+    if "edit_index" in st.session_state:
+        idx = st.session_state.edit_index
+        task = st.session_state.tasks[idx]
+
+        new_name = st.text_input("Task Name", value=task["name"])
+        new_optimal = st.number_input("Optimal Duration (min)", value=task["optimal_duration"])
+        new_energy = st.slider("Energy Required",1,10, value=task["required_energy"])
+
+        if st.button("Save Changes"):
+            task["name"] = new_name
+            task["optimal_duration"] = new_optimal
+            task["required_energy"] = new_energy
+            save_user_data()
+            del st.session_state.edit_index
+            st.experimental_rerun()
+
 elif menu == "Profile":
     st.title("👤 Profile")
+
     with st.form("profile_form"):
         age = st.number_input("Age", value=st.session_state.profile.get("age",25))
         wake = st.time_input("Wake-up Time")
         sleep = st.time_input("Sleep Time")
+
         if st.form_submit_button("Save"):
             st.session_state.profile={"age":age,"wake":str(wake),"sleep":str(sleep)}
             save_user_data()
             st.success("Saved!")
-
-elif menu == "AI Coach":
-    st.title(" AI Coach")
-    if st.button("Generate Feedback"):
-        feedback = get_ai_feedback()
-        if "Not enough data" in feedback:
-            st.info(" Keep going! Log a few sessions and your personal AI coach will give you insights.")
-        else:
-            st.write(f" Your AI Coach says:\n{feedback}\n\n You're improving every day, keep it up!")
